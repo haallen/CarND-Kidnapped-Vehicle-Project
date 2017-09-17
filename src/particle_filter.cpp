@@ -32,6 +32,7 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
 	normal_distribution<double> dist_theta(theta, std[2]);
 
 	num_particles = 50;
+	weights.resize(num_particles);
 
 	for (int i = 0; i < num_particles; i++) {
 		Particle p;
@@ -41,6 +42,7 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
 		p.theta = dist_theta(gen);
 		p.weight = 1.0;
 		particles.push_back(p);
+		weights[i] = 1.0;
 	}
 	is_initialized = true;
 }
@@ -52,10 +54,11 @@ void ParticleFilter::prediction(double delta_t, double std_pos[], double velocit
 	//  http://www.cplusplus.com/reference/random/default_random_engine/
 
 	// Create a normal (Gaussian) distribution for x, y, theta
-	normal_distribution<double> dist_x(0, std_pos[0]);
-	normal_distribution<double> dist_y(0, std_pos[1]);
-	normal_distribution<double> dist_theta(0, std_pos[2]);
+	normal_distribution<double> dist_x(0.0, std_pos[0]);
+	normal_distribution<double> dist_y(0.0, std_pos[1]);
+	normal_distribution<double> dist_theta(0.0, std_pos[2]);
 	for (int i = 0; i < num_particles; i++) {
+		//avoid divide by 0
 		if (fabs(yaw_rate)<0.001){
 			particles[i].x += velocity*delta_t*cos(particles[i].theta);
 		    particles[i].y += velocity*delta_t*sin(particles[i].theta);
@@ -84,13 +87,10 @@ void ParticleFilter::dataAssociation(std::vector<LandmarkObs> predicted, std::ve
 			double calc_dist = dist(observations[i].x,observations[i].y,predicted[j].x,predicted[j].y);
 			if (calc_dist < min_dist){
 				min_dist = calc_dist;
-				closest_idx = j;//predicted[j].id;
+				closest_idx = predicted[j].id;
 			}
 		}
 		observations[i].id = closest_idx;
-		//std::cout<<"obs "<<observations[i].x<<" "<<observations[i].y<< " "<<observations[i].id<<std::endl;
-		//std::cout<<"pred "<<predicted[closest_idx].x<<" "<<predicted[closest_idx].y<< " "<<predicted[closest_idx].id<<std::endl;
-		//std::cout<<" closest idx "<< closest_idx<<std::endl;
 	}
 }
 
@@ -119,8 +119,8 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 		//rotate the observations to map coordinate frame
 		std::vector<LandmarkObs> rot_observations;
 		for (int i = 0; i<observations.size();i++){
-			double rot_x = particles[i].x + cos(particles[j].theta)*observations[i].x - sin(particles[j].theta)*observations[i].y;
-			double rot_y = particles[i].y + sin(particles[j].theta)*observations[i].x + cos(particles[j].theta)*observations[i].y;
+			double rot_x = particles[j].x + cos(particles[j].theta)*observations[i].x - sin(particles[j].theta)*observations[i].y;
+			double rot_y = particles[j].y + sin(particles[j].theta)*observations[i].x + cos(particles[j].theta)*observations[i].y;
 			int rot_id = observations[i].id;
 			rot_observations.push_back(LandmarkObs{rot_id, rot_x, rot_y});
 		}
@@ -132,21 +132,25 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 		double gauss_norm= (1/(2 * M_PI * std_landmark[0] * std_landmark[1]));
 
 		particles[j].weight = 1.0;
+		weights[j] = 1.0;
 
 		for (int i = 0; i<rot_observations.size();i++){
-
-			// calculate exponent
-			double mu_x = range_landmarks[rot_observations[i].id].x;
-			double mu_y = range_landmarks[rot_observations[i].id].y;
-			double diff_x = rot_observations[i].x - mu_x;
-			double diff_y = rot_observations[i].y - mu_y;
-			double exponent1 = (diff_x*diff_x)/(2*std_landmark[0]*std_landmark[0]);
-			double exponent2 = (diff_y*diff_y)/(2*std_landmark[1]*std_landmark[1]);
-			double exponent = exponent1+exponent2;
-			//calculate weight using normalization terms and exponent
-			particles[j].weight *= (gauss_norm *exp(-exponent));
+			for (int k = 0 ; k < range_landmarks.size() ; k++ ){
+			    if (rot_observations[i].id == range_landmarks[k].id){
+					// calculate exponent
+					double mu_x = range_landmarks[k].x;
+					double mu_y = range_landmarks[k].y;
+					double diff_x = rot_observations[i].x - mu_x;
+					double diff_y = rot_observations[i].y - mu_y;
+					double exponent1 = (diff_x*diff_x)/(2*std_landmark[0]*std_landmark[0]);
+					double exponent2 = (diff_y*diff_y)/(2*std_landmark[1]*std_landmark[1]);
+					double exponent = exponent1+exponent2;
+					//calculate weight using normalization terms and exponent
+					particles[j].weight *= (gauss_norm *exp(-exponent));
+			    }
+			}
 		}
-		//std::cout<<"particle "<<j<<" "<<particles[j].weight<<std::endl;
+		weights[j] = particles[j].weight;
 	}
 }
 
@@ -155,27 +159,12 @@ void ParticleFilter::resample() {
 	// NOTE: You may find std::discrete_distribution helpful here.
 	//   http://en.cppreference.com/w/cpp/numeric/random/discrete_distribution
 
-	uniform_int_distribution<> distribution_i(0,num_particles-1);
-	int index = distribution_i(gen);
-
+	discrete_distribution<int> distrib(weights.begin(), weights.end());
 	vector<Particle> sampled_particles;
-	double beta = 0.0;
 
-	double mw = 0.0;
-	for (int j = 0; j<num_particles; ++j){
-		if (particles[j].weight > mw){
-			mw = particles[j].weight;
-		}
-	}
-	uniform_real_distribution<int> distribution_r(0.0,mw);
-
-	for (int j = 0; j<num_particles; j++){
-		beta += distribution_r(gen)*2.0;
-		while (beta > particles[index].weight){
-			beta -= particles[index].weight;
-			index += 1;
-		}
-		sampled_particles.push_back(particles[index]);
+	for(int i=0; i < num_particles; i++){
+	    int index = distrib(gen);
+	    sampled_particles.push_back(particles[index]);
 	}
 	particles = sampled_particles;
 }
